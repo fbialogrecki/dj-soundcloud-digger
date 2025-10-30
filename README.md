@@ -1,21 +1,22 @@
 # SoundCloud Purchase Links Scraper
 
-This repository contains a Python tool that automates the process of extracting download or store links from public SoundCloud playlists. The script dynamically loads the entire playlist using Selenium, then parses the page to extract individual track URLs. For each track, it retrieves the track page and searches for download or purchase links based on keywords (such as "download", "buy", "purchase", "premiere", or "kup").
+This repository contains a Python tool that automates the process of extracting download or store links from public SoundCloud playlists. Save the playlist page as HTML, let the tool analyse every track, and instantly open the discovered Bandcamp / Beatport / JunoDownload / Hypeedit links in your preferred browser.
 
 ## Features
 
-- **Dynamic Loading:** Automatically scrolls through a SoundCloud playlist to load all tracks.
-- **Track Extraction:** Uses BeautifulSoup to extract track URLs from the fully loaded playlist page.
-- **Link Categorisation:** Fetches each track's page via requests and scans for download/store links, assigning them to categories such as Bandcamp, Beatport, JunoDownload, HypeEdit, SoundCloud Download, Other, or SoundCloud Only (no external links).
-- **Flexible Exports:** Optionally export categorized results to JSON or YAML for later automation, or keep them in memory for immediate processing.
+- **Offline-friendly:** Works on HTML pages saved from any browser – ideal when Selenium is blocked or unreliable.
+- **Smart categorisation:** Classifies store links into Bandcamp, Beatport, JunoDownload, Hypeedit, or `others` when no known store is detected.
+- **Progress visibility:** A terminal progress bar keeps you informed while tracks are analysed, with retries and back-off for network hiccups.
+- **Flexible output:** Export results to JSON or YAML, or reuse an existing JSON file without re-scraping.
+- **One-click opening:** Instantly open store links (per category) in Chrome, Firefox, Edge, Opera, Safari or the system default browser. Opening all at once remains the default behaviour, with a flag to disable it.
 
 ## Requirements
 
-- Python 3.x
-- [Selenium](https://www.selenium.dev/) (with a compatible WebDriver such as ChromeDriver)
-- [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/bs4/doc/)
+- Python 3.9+
 - [Requests](https://docs.python-requests.org/)
-- [PyYAML](https://pyyaml.org/) *(optional, required only for YAML export)*
+- [BeautifulSoup4](https://www.crummy.com/software/BeautifulSoup/bs4/doc/)
+- [PyYAML](https://pyyaml.org/) *(optional – only for YAML export)*
+- [tqdm](https://tqdm.github.io/) for the terminal progress bar
 
 ## Installation
 
@@ -34,45 +35,51 @@ This repository contains a Python tool that automates the process of extracting 
 
    ```
 
-3. Ensure your WebDriver (e.g., ChromeDriver) is installed and properly set up in your PATH. For YAML export support the `pyyaml` package is included in `requirements.txt`.
-
 ## Usage
 
-Run the script using Python:
+### 1. Save the playlist HTML
+
+1. Open the playlist in your browser.
+2. Scroll to the very bottom so that every track is loaded.
+3. Save the page as **Complete webpage (HTML)**, e.g. `SoundCloud_playlist.html`.
+
+### 2. Scrape the saved HTML
 
 ```bash
-python dj-soundcloud-digger.py [PLAYLIST_URL] [options]
-```
-
-or run it as bash script (if you work on a Linux operating system)
-
-```bash
-./dj-soundcloud-digger.py
-```
-
-When prompted (or via CLI flags), enter the URL of the public SoundCloud playlist. The script will process the playlist, print categorized results, and optionally produce an export file.
-
-### Command-line options
-
-```bash
-python dj-soundcloud-digger.py \
-  "https://soundcloud.com/your-playlist" \
+python dj-soundcloud-digger.py scrape SoundCloud_playlist.html \
   --export json \
-  --output my_links.json \
-  --pause-time 2 \
-  --initial-wait 3 \
-  --max-scrolls 20 \
-  --show-browser
+  --output soundcloud_links.json \
+  --open-category all \
+  --browser chrome
 ```
 
-- `--export {json,yaml,none}` – choose export format. Omit to answer interactively.
-- `--output PATH` – custom export file path (`soundcloud_links.<ext>` by default).
-- `--pause-time` – delay between scrolls when loading the playlist (seconds).
-- `--initial-wait` – delay after opening playlist before scrolling (seconds).
-- `--max-scrolls` – limit the number of scroll attempts (unlimited if omitted).
-- `--show-browser` – open Chrome in headed mode for debugging.
+- `--export {json,yaml,none}` – choose export format (default: `json`).
+- `--open-category {hypeddit,bandcamp,beatport,junodownload,others,all}` – which category to open afterwards (default: `all`).
+- `--no-open` – skip opening links in the browser.
+- `--browser {default,chrome,firefox,edge,safari,opera}` – browser controller to use (default: system default).
+- `--delay` – delay between track requests (default: `0.5s`).
+- `--timeout` – HTTP timeout per track (default: `20s`).
+- `--max-tracks` – process only the first N tracks (useful for testing).
 
-Tracks with only the SoundCloud page available are listed under the `soundcloud_only` category for manual follow-up.
+The command prints a progress bar while fetching each track, saves the summary (if `--export` is enabled) and opens the requested links when finished.
+
+### 3. Re-open links from JSON
+
+```bash
+python dj-soundcloud-digger.py open soundcloud_links.json \
+  --category bandcamp \
+  --browser firefox \
+  --skip 10 \
+  --limit 20
+```
+
+- `--category` – which category to open (default: `all`).
+- `--skip` / `--limit` – skip or limit the number of links to open.
+- `--no-open` – only display the summary without opening links.
+
+### Log level
+
+Add `--log-level DEBUG` for verbose output (network retries, per-track details), or `--log-level WARNING` to silence informational logs.
 
 ## License
 

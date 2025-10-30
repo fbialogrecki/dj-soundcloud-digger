@@ -2,17 +2,21 @@
 
 import argparse
 import json
-import os
+import logging
 import re
 import time
 import webbrowser
 from collections import defaultdict
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from requests.adapters import HTTPAdapter
+from tqdm import tqdm
+from urllib3.util.retry import Retry
 
 DOWNLOAD_KEYWORDS = {"download", "free download", "free d/l"}
 LINK_KEYWORDS = DOWNLOAD_KEYWORDS | {"buy", "purchase", "premiere", "kup"}
@@ -22,6 +26,15 @@ STORE_DOMAINS = {
     "junodownload": {"junodownload.com", "juno.co.uk"},
     "hypeddit": {"hypeddit.com", "hypd.it"},
 }
+BROWSER_CHOICES = ["default", "chrome", "firefox", "edge", "safari", "opera"]
+BROWSER_ALIASES = {
+    "chrome": "chrome",
+    "firefox": "firefox",
+    "edge": "edge",
+    "safari": "safari",
+    "opera": "opera",
+}
+LOGGER = logging.getLogger(__name__)
 CATEGORY_NAMES = [
     "hypeddit",
     "bandcamp",
@@ -87,6 +100,27 @@ REQUEST_HEADERS = {
 }
 
 
+def create_requests_session(max_retries: int = 5, backoff_factor: float = 0.5) -> requests.Session:
+    """Return a requests session with retry/backoff configured."""
+
+    retry_strategy = Retry(
+        total=max_retries,
+        connect=max_retries,
+        read=max_retries,
+        status=max_retries,
+        allowed_methods=["HEAD", "GET", "OPTIONS"],
+        status_forcelist=[429, 500, 502, 503, 504],
+        backoff_factor=backoff_factor,
+        raise_on_status=False,
+    )
+    adapter = HTTPAdapter(max_retries=retry_strategy)
+
+    session = requests.Session()
+    session.headers.update(REQUEST_HEADERS)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
 
 @dataclass
 class LinkRecord:
@@ -97,62 +131,127 @@ class LinkRecord:
     link_text: str
 
 
-def parse_args() -> argparse.Namespace:
+LOG_LEVELS = ["CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"]
+CATEGORY_CHOICES = CATEGORY_NAMES + ["all"]
+
+
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Extract download and store links from SoundCloud playlist HTML file or open links from existing JSON"
+        description="Extract download and store links from a SoundCloud playlist or open previously exported links."
     )
     parser.add_argument(
-        "input_file",
-        nargs="?",
-        help="Path to HTML file saved from SoundCloud playlist page, or JSON file with existing results",
+        "--log-level",
+        default="INFO",
+        choices=LOG_LEVELS,
+        help="Logging verbosity (default: INFO)",
     )
-    parser.add_argument(
+
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    # Scrape command
+    scrape = subparsers.add_parser(
+        "scrape",
+        help="Scrape a saved SoundCloud playlist HTML file and optionally open the results.",
+    )
+    scrape.add_argument("html_file", type=Path, help="Path to the saved SoundCloud playlist HTML file")
+    scrape.add_argument(
         "--export",
         choices=["json", "yaml", "none"],
-        help="Export format for categorized links. Defaults to interactive prompt (ignored when using --open with JSON)",
+        default="json",
+        help="Export format for categorized links (default: json)",
     )
-    parser.add_argument(
+    scrape.add_argument(
         "--output",
+        type=Path,
         help="Optional path for the export file. Defaults to soundcloud_links.<ext>",
     )
-    parser.add_argument(
-        "--open",
-        choices=["hypeddit", "bandcamp", "beatport", "junodownload", "others", "all"],
-        help="Open links from specified category in browser (without loading pages). If input is JSON, skips HTML processing.",
+    scrape.add_argument(
+        "--open-category",
+        choices=CATEGORY_CHOICES,
+        default="all",
+        help="Category to open after scraping (default: all)",
     )
-    return parser.parse_args()
+    scrape.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Do not open links in a browser after scraping",
+    )
+    scrape.add_argument(
+        "--browser",
+        choices=BROWSER_CHOICES,
+        default="default",
+        help="Browser to use when opening links (default: system default)",
+    )
+    scrape.add_argument(
+        "--delay",
+        type=float,
+        default=0.5,
+        help="Delay between track requests in seconds (default: 0.5)",
+    )
+    scrape.add_argument(
+        "--timeout",
+        type=float,
+        default=20.0,
+        help="HTTP request timeout in seconds (default: 20)",
+    )
+    scrape.add_argument(
+        "--max-tracks",
+        type=int,
+        help="Optional limit on number of tracks to process (useful for testing)",
+    )
+
+    # Open command
+    open_cmd = subparsers.add_parser(
+        "open",
+        help="Open links from a previously exported JSON summary.",
+    )
+    open_cmd.add_argument("summary_file", type=Path, help="Path to the JSON summary file")
+    open_cmd.add_argument(
+        "--category",
+        choices=CATEGORY_CHOICES,
+        default="all",
+        help="Category to open (default: all)",
+    )
+    open_cmd.add_argument(
+        "--browser",
+        choices=BROWSER_CHOICES,
+        default="default",
+        help="Browser to use when opening links (default: system default)",
+    )
+    open_cmd.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Only display summary without opening any links",
+    )
+    open_cmd.add_argument(
+        "--skip",
+        type=int,
+        default=0,
+        help="Number of links to skip before opening (default: 0)",
+    )
+    open_cmd.add_argument(
+        "--limit",
+        type=int,
+        help="Maximum number of links to open",
+    )
+
+    return parser
 
 
-def prompt_missing_arguments(args: argparse.Namespace) -> argparse.Namespace:
-    if not args.input_file:
-        args.input_file = input("Enter path to HTML file or JSON file: ").strip()
-
-    # Jeśli używamy --open z JSON, nie potrzebujemy export
-    if not args.open and not args.export:
-        while True:
-            choice = (
-                input("Choose export format (json/yaml/none): ")
-                .strip()
-                .lower()
-            )
-            if choice in {"json", "yaml", "none"}:
-                args.export = choice
-                break
-            print("Please enter 'json', 'yaml', or 'none'.")
-    elif not args.export:
-        args.export = "none"  # Default jeśli nie podano
-    return args
+def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
 
 
 def load_json_file(json_file_path: str) -> Dict[str, List[Dict[str, str]]]:
     """Load summary data from existing JSON file."""
-    if not os.path.exists(json_file_path):
+    path = Path(json_file_path)
+    if not path.exists():
         raise FileNotFoundError(f"JSON file not found: {json_file_path}")
     
-    print(f"Loading JSON file: {json_file_path}")
+    print(f"Loading JSON file: {path}")
     
     try:
-        with open(json_file_path, 'r', encoding='utf-8') as f:
+        with path.open("r", encoding="utf-8") as f:
             data = json.load(f)
         
         # Validate structure
@@ -180,22 +279,19 @@ def load_json_file(json_file_path: str) -> Dict[str, List[Dict[str, str]]]:
         raise Exception(f"Error loading JSON file: {e}")
 
 
-def load_tracks_from_html_file(html_file_path: str) -> Tuple[List[str], Optional[int]]:
+def load_tracks_from_html_file(html_file_path: Path) -> Tuple[List[str], Optional[int]]:
     """Load track URLs from a saved HTML file."""
-    
-    if not os.path.exists(html_file_path):
+    path = Path(html_file_path)
+    if not path.exists():
         raise FileNotFoundError(f"HTML file not found: {html_file_path}")
-    
-    print(f"Loading HTML file: {html_file_path}")
-    
+
+    print(f"Loading HTML file: {path}")
+
     try:
-        with open(html_file_path, 'r', encoding='utf-8') as f:
-            html_content = f.read()
+        html_content = path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
-        # Try with different encoding
-        with open(html_file_path, 'r', encoding='latin-1') as f:
-            html_content = f.read()
-    
+        html_content = path.read_text(encoding="latin-1")
+
     print("Parsing HTML content...")
     soup = BeautifulSoup(html_content, 'html.parser')
     
@@ -456,16 +552,26 @@ def analyze_links(track_url: str, soup: BeautifulSoup) -> Dict[str, List[LinkRec
     return categories
 
 
-def fetch_track_page(track_url: str) -> Optional[BeautifulSoup]:
+def fetch_track_page(
+    track_url: str,
+    session: requests.Session,
+    timeout: float,
+) -> Optional[BeautifulSoup]:
+    """Retrieve a track page with retry-aware session and improved error handling."""
+
     try:
-        response = requests.get(track_url, headers=REQUEST_HEADERS, timeout=20)
-        if response.status_code >= 400:
-            print(f"Could not retrieve track page ({response.status_code}): {track_url}")
-            return None
-        return BeautifulSoup(response.text, "html.parser")
-    except Exception as exc:
-        print(f"Error while retrieving {track_url}: {exc}")
+        response = session.get(track_url, timeout=timeout)
+    except requests.RequestException as exc:
+        logging.getLogger(__name__).warning("Request error for %s: %s", track_url, exc)
         return None
+
+    if response.status_code >= 400:
+        logging.getLogger(__name__).warning(
+            "Could not retrieve track page (%s): %s", response.status_code, track_url
+        )
+        return None
+
+    return BeautifulSoup(response.text, "html.parser")
 
 
 def summarize_categories(categorized: Dict[str, List[LinkRecord]]) -> Dict[str, List[Dict[str, str]]]:
@@ -501,112 +607,158 @@ def summarize_categories(categorized: Dict[str, List[LinkRecord]]) -> Dict[str, 
     return summary
 
 
-def open_links_in_browser(summary: Dict[str, List[Dict[str, str]]], category: str) -> None:
-    """Open shop_link from specified category in browser. Falls back to track_url if shop_link is missing or same as track_url."""
-    if category == "all":
-        categories_to_open = CATEGORY_NAMES
-    else:
-        if category not in summary:
-            print(f"Category '{category}' not found in results.")
-            return
-        categories_to_open = [category]
-    
+def log_summary(summary: Dict[str, List[Dict[str, str]]]) -> None:
+    LOGGER.info("Summary:")
+    for category in CATEGORY_NAMES:
+        count = len(summary.get(category, []))
+        LOGGER.info("  %s: %s", category, count)
+
+
+def resolve_browser_controller(browser_name: str) -> webbrowser.BaseBrowser:
+    target = BROWSER_ALIASES.get(browser_name, browser_name)
+    try:
+        return webbrowser.get(target if browser_name != "default" else None)
+    except webbrowser.Error as exc:
+        LOGGER.warning(
+            "Could not resolve browser '%s' (%s). Falling back to system default.",
+            browser_name,
+            exc,
+        )
+        return webbrowser.get()
+
+
+def open_links_in_browser(
+    summary: Dict[str, List[Dict[str, str]]],
+    category: str,
+    *,
+    browser: str = "default",
+    skip: int = 0,
+    limit: Optional[int] = None,
+    disable_open: bool = False,
+) -> None:
+    """Open links in the requested browser controller with optional slicing."""
+
+    if disable_open:
+        LOGGER.info("Opening links skipped (--no-open).")
+        return
+
+    categories_to_open = CATEGORY_NAMES if category == "all" else [category]
+
+    # Flatten records preserving category order
+    records: List[Tuple[str, Dict[str, str]]] = []
+    for cat in categories_to_open:
+        items = summary.get(cat, [])
+        if not items:
+            continue
+        records.extend((cat, item) for item in items)
+
+    if not records:
+        LOGGER.info("No links found for the requested category '%s'.", category)
+        return
+
+    if skip:
+        records = records[skip:]
+    if limit is not None:
+        records = records[:limit]
+
+    if not records:
+        LOGGER.info("No links left to open after applying skip/limit filters.")
+        return
+
+    controller = resolve_browser_controller(browser)
+
     total_opened = 0
     shop_links_opened = 0
     track_links_opened = 0
-    
-    for cat in categories_to_open:
-        if cat not in summary or not summary[cat]:
-            continue
-        
-        links = summary[cat]
-        print(f"\nProcessing {len(links)} items from '{cat}' category...")
-        
-        for item in links:
-            shop_link = item.get("shop_link", "").strip()
-            track_url = item.get("track_url", "").strip()
-            
-            # Określ który link otworzyć:
-            # 1. Jeśli shop_link istnieje i jest różny od track_url → otwórz shop_link
-            # 2. W przeciwnym razie → otwórz track_url jako fallback
-            if shop_link and shop_link != track_url:
-                # Mamy prawdziwy link do sklepu
-                link_to_open = shop_link
-                shop_links_opened += 1
-            else:
-                # Brak shop_link lub jest taki sam jak track_url → użyj track_url
-                if not track_url:
-                    print(f"Warning: No track_url or shop_link for item: {item.get('title', 'Unknown')}")
-                    continue
-                link_to_open = track_url
-                track_links_opened += 1
-            
-            try:
-                webbrowser.open_new_tab(link_to_open)
-                total_opened += 1
-                # Small delay to avoid overwhelming the browser
-                time.sleep(0.1)
-            except Exception as e:
-                print(f"Failed to open {link_to_open}: {e}")
-        
-        if cat != categories_to_open[-1]:
-            # Small delay between categories
-            time.sleep(0.5)
-    
-    print(f"\nOpened {total_opened} links in browser:")
-    print(f"  - {shop_links_opened} shop links")
-    print(f"  - {track_links_opened} track links (fallback)")
+
+    for cat, item in records:
+        shop_link = (item.get("shop_link") or "").strip()
+        track_url = (item.get("track_url") or "").strip()
+
+        if shop_link and shop_link != track_url:
+            link_to_open = shop_link
+            shop_links_opened += 1
+        else:
+            if not track_url:
+                LOGGER.warning(
+                    "Skipping item without usable link in category '%s': %s",
+                    cat,
+                    item.get("title", "Unknown"),
+                )
+                continue
+            link_to_open = track_url
+            track_links_opened += 1
+
+        try:
+            controller.open_new_tab(link_to_open)
+            total_opened += 1
+            time.sleep(0.1)
+        except Exception as exc:
+            LOGGER.error("Failed to open %s: %s", link_to_open, exc)
+
+    LOGGER.info(
+        "Opened %s links in browser '%s' (%s shop, %s track fallbacks).",
+        total_opened,
+        browser,
+        shop_links_opened,
+        track_links_opened,
+    )
 
 
 def export_results(summary: Dict[str, List[Dict[str, str]]], export_format: str, output_path: Optional[str]) -> None:
     if export_format == "none":
         return
 
-    filename = output_path
-    if not filename:
+    if output_path:
+        filename = Path(output_path)
+    else:
         extension = "json" if export_format == "json" else "yaml"
-        filename = f"soundcloud_links.{extension}"
+        filename = Path(f"soundcloud_links.{extension}")
+
+    filename.parent.mkdir(parents=True, exist_ok=True)
 
     if export_format == "json":
-        with open(filename, "w", encoding="utf-8") as handle:
+        with filename.open("w", encoding="utf-8") as handle:
             json.dump(summary, handle, ensure_ascii=False, indent=2)
-        print(f"Saved categorized links to {filename}")
+        LOGGER.info("Saved categorized links to %s", filename)
         return
 
     try:
         import yaml  # type: ignore
 
-        with open(filename, "w", encoding="utf-8") as handle:
+        with filename.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(summary, handle, sort_keys=False, allow_unicode=True)
-        print(f"Saved categorized links to {filename}")
+        LOGGER.info("Saved categorized links to %s", filename)
     except ModuleNotFoundError:
-        print("PyYAML not installed. Install via 'pip install pyyaml' to export YAML.")
+        LOGGER.error("PyYAML not installed. Install via 'pip install pyyaml' to export YAML.")
 
 
-def collect_track_data(track_links: Iterable[str]) -> Dict[str, List[LinkRecord]]:
+def collect_track_data(
+    track_links: Iterable[str],
+    session: requests.Session,
+    delay: float,
+    timeout: float,
+) -> Dict[str, List[LinkRecord]]:
     categorized: Dict[str, List[LinkRecord]] = defaultdict(list)
     track_list = list(track_links)
-    total_tracks = len(track_list)
-    
-    print(f"\nAttempting to retrieve links for {total_tracks} tracks:")
-    for idx, track_url in enumerate(track_list, 1):
-        # Rate limiting - małe opóźnienie aby uniknąć blokady
-        if idx > 1:
-            time.sleep(0.5)
-        
-        soup = fetch_track_page(track_url)
+    if not track_list:
+        return categorized
+
+    progress = tqdm(track_list, desc="Fetching tracks", unit="track")
+    for track_url in progress:
+        soup = fetch_track_page(track_url, session=session, timeout=timeout)
         if soup is None:
-            # Jeśli nie można pobrać strony, dodaj do "others"
             categorized["others"].append(
                 LinkRecord("others", "Unknown title", track_url, track_url, "Could not fetch track page")
             )
-            print(f"[{idx}/{total_tracks}] {track_url} -> Error: Could not fetch")
+            tqdm.write(f"{track_url} -> Error: Could not fetch")
+            if delay > 0:
+                time.sleep(delay)
             continue
 
         title = extract_title(soup)
         per_track = analyze_links(track_url, soup)
         if not per_track:
-            # Jeśli analyze_links zwróciło pusty dict, dodaj do "others"
             per_track = {
                 "others": [
                     LinkRecord("others", title, track_url, track_url, "No links found")
@@ -623,108 +775,103 @@ def collect_track_data(track_links: Iterable[str]) -> Dict[str, List[LinkRecord]
         ]
         if store_categories:
             stores = ", ".join(sorted(store_categories))
-            print(f"[{idx}/{total_tracks}] {track_url} -> Store links: {stores}")
+            tqdm.write(f"{track_url} -> Store links: {stores}")
         else:
-            print(f"[{idx}/{total_tracks}] {track_url} -> No store link")
+            tqdm.write(f"{track_url} -> No store link")
+
+        if delay > 0:
+            time.sleep(delay)
+
+    progress.close()
     return categorized
 
 
-def main():
-    args = prompt_missing_arguments(parse_args())
+def handle_scrape(args: argparse.Namespace) -> None:
+    html_file: Path = args.html_file
+    if not html_file.exists():
+        raise FileNotFoundError(f"HTML file not found: {html_file}")
 
-    # Sprawdź czy plik to JSON czy HTML
-    input_file = args.input_file
-    if not input_file:
-        print("Error: No input file specified.")
-        return
-    
-    is_json = input_file.lower().endswith('.json')
-    
-    # Jeśli mamy JSON i chcemy tylko otworzyć linki, pominąć przetwarzanie HTML
-    if is_json and args.open:
-        try:
-            summary = load_json_file(input_file)
-            
-            print("\nSummary from JSON:")
-            for category in CATEGORY_NAMES:
-                count = len(summary.get(category, []))
-                if count > 0:
-                    print(f"{category}: {count}")
-            
-            # Otwórz linki
-            open_links_in_browser(summary, args.open)
-            return
-        except Exception as e:
-            print(f"Error: {e}")
-            return
-    
-    # Jeśli to JSON ale nie ma --open, możemy go użyć jako źródła danych
-    if is_json:
-        try:
-            summary = load_json_file(input_file)
-            
-            print("\nSummary from JSON:")
-            for category in CATEGORY_NAMES:
-                count = len(summary.get(category, []))
-                if count > 0:
-                    print(f"{category}: {count}")
-            
-            # Eksportuj jeśli potrzeba (może z inną nazwą)
-            if args.export != "none":
-                export_results(summary, args.export, args.output)
-            
-            # Otwórz linki jeśli potrzeba
-            if args.open:
-                open_links_in_browser(summary, args.open)
-            return
-        except Exception as e:
-            print(f"Error loading JSON: {e}")
-            print("Treating as HTML file...")
-            # Fall through to HTML processing
-    
-    # Przetwarzanie HTML (oryginalna logika)
-    print("Loading tracks from HTML file...")
-    try:
-        track_links, declared_count = load_tracks_from_html_file(input_file)
-    except FileNotFoundError as e:
-        print(f"Error: {e}")
-        return
-    except Exception as e:
-        print(f"Error loading HTML file: {e}")
-        return
+    track_links, declared_count = load_tracks_from_html_file(html_file)
+
+    if args.max_tracks is not None and args.max_tracks >= 0:
+        track_links = track_links[: args.max_tracks]
+        LOGGER.info("Limiting processing to first %s tracks", len(track_links))
 
     if not track_links:
-        print("No track links found in HTML file.")
-        print("\nTip: Make sure you:")
-        print("1. Fully scroll down the playlist page in your browser")
-        print("2. Wait for all tracks to load")
-        print("3. Save the complete page HTML (Ctrl+S or right-click -> Save As)")
+        LOGGER.warning("No track links found in HTML file '%s'.", html_file)
+        LOGGER.info(
+            "Tip: Ensure the playlist page is fully scrolled, all tracks are loaded, and the HTML is saved completely."
+        )
         return
 
     if declared_count and len(track_links) != declared_count:
-        print(
-            f"Warning: found {len(track_links)} tracks, playlist declares {declared_count}."
+        LOGGER.warning(
+            "Collected %s tracks but playlist declares %s.",
+            len(track_links),
+            declared_count,
         )
+    else:
+        LOGGER.info("Collected %s tracks from HTML file.", len(track_links))
 
-    print(f"\nFound {len(track_links)} tracks:")
-    for i, track in enumerate(track_links, 1):
-        print(f"{i}. {track}")
-
-    print("\nAnalyzing each track for download/store links...")
-    categorized = collect_track_data(track_links)
+    session = create_requests_session()
+    try:
+        categorized = collect_track_data(
+            track_links,
+            session=session,
+            delay=args.delay,
+            timeout=args.timeout,
+        )
+    finally:
+        session.close()
 
     summary = summarize_categories(categorized)
-    export_results(summary, args.export, args.output)
 
-    print("\nSummary:")
-    for category in CATEGORY_NAMES:
-        count = len(summary.get(category, []))
-        if count > 0:
-            print(f"{category}: {count}")
-    
-    # Open links in browser if requested
-    if args.open:
-        open_links_in_browser(summary, args.open)
+    if args.export != "none":
+        export_results(summary, args.export, args.output)
+
+    log_summary(summary)
+
+    if args.no_open:
+        LOGGER.info("Opening links skipped (--no-open).")
+        return
+
+    open_links_in_browser(
+        summary,
+        args.open_category,
+        browser=args.browser,
+        skip=0,
+        limit=None,
+        disable_open=False,
+    )
+
+
+def handle_open(args: argparse.Namespace) -> None:
+    summary_file: Path = args.summary_file
+    summary = load_json_file(summary_file)
+
+    log_summary(summary)
+
+    open_links_in_browser(
+        summary,
+        args.category,
+        browser=args.browser,
+        skip=max(0, args.skip),
+        limit=args.limit,
+        disable_open=args.no_open,
+    )
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    args = parse_cli_args(argv)
+
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
+    LOGGER.setLevel(log_level)
+
+    if args.command == "scrape":
+        handle_scrape(args)
+    elif args.command == "open":
+        handle_open(args)
 
 
 if __name__ == "__main__":
