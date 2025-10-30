@@ -3,11 +3,7 @@
 import argparse
 import json
 import os
-import platform
 import re
-import shutil
-import subprocess
-import tempfile
 import time
 import webbrowser
 from collections import defaultdict
@@ -43,7 +39,6 @@ RESERVED_TRACK_SLUGS = {
     "reposts",
     "library",
     "popular-tracks",
-    "albums",
     "groups",
     "comments",
     "events",
@@ -91,15 +86,6 @@ REQUEST_HEADERS = {
     )
 }
 
-CLIENT_ID_PATTERNS = [
-    re.compile(r"client_id\s*[:=]\s*\"([0-9a-zA-Z]{16,32})\""),
-    re.compile(r"client_id\s*[:=]\s*'([0-9a-zA-Z]{16,32})'"),
-    re.compile(r"client_id%22%3A%22([0-9a-zA-Z]{16,32})%22"),
-    re.compile(r"client_id\\\":\\\"([0-9a-zA-Z]{16,32})\\\""),
-]
-
-
-_CLIENT_ID_CACHE: Optional[str] = None
 
 
 @dataclass
@@ -173,7 +159,20 @@ def load_json_file(json_file_path: str) -> Dict[str, List[Dict[str, str]]]:
         if not isinstance(data, dict):
             raise ValueError("JSON file must contain a dictionary")
         
+        # Validate that values are lists
+        for category, items in data.items():
+            if not isinstance(items, list):
+                raise ValueError(f"Category '{category}' must contain a list")
+            # Validate item structure
+            for item in items:
+                if not isinstance(item, dict):
+                    raise ValueError(f"Items in category '{category}' must be dictionaries")
+                if "track_url" not in item:
+                    raise ValueError(f"Items in category '{category}' must have 'track_url' field")
+        
         print(f"Loaded JSON with categories: {', '.join(data.keys())}")
+        total_items = sum(len(items) for items in data.values())
+        print(f"Total items: {total_items}")
         return data
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON file: {e}")
@@ -586,14 +585,22 @@ def export_results(summary: Dict[str, List[Dict[str, str]]], export_format: str,
 
 def collect_track_data(track_links: Iterable[str]) -> Dict[str, List[LinkRecord]]:
     categorized: Dict[str, List[LinkRecord]] = defaultdict(list)
-    print("\nAttempting to retrieve links for tracks:")
-    for track_url in track_links:
+    track_list = list(track_links)
+    total_tracks = len(track_list)
+    
+    print(f"\nAttempting to retrieve links for {total_tracks} tracks:")
+    for idx, track_url in enumerate(track_list, 1):
+        # Rate limiting - małe opóźnienie aby uniknąć blokady
+        if idx > 1:
+            time.sleep(0.5)
+        
         soup = fetch_track_page(track_url)
         if soup is None:
             # Jeśli nie można pobrać strony, dodaj do "others"
             categorized["others"].append(
                 LinkRecord("others", "Unknown title", track_url, track_url, "Could not fetch track page")
             )
+            print(f"[{idx}/{total_tracks}] {track_url} -> Error: Could not fetch")
             continue
 
         title = extract_title(soup)
@@ -616,9 +623,9 @@ def collect_track_data(track_links: Iterable[str]) -> Dict[str, List[LinkRecord]
         ]
         if store_categories:
             stores = ", ".join(sorted(store_categories))
-            print(f"{track_url} -> Store links: {stores}")
+            print(f"[{idx}/{total_tracks}] {track_url} -> Store links: {stores}")
         else:
-            print(f"{track_url} -> No store link")
+            print(f"[{idx}/{total_tracks}] {track_url} -> No store link")
     return categorized
 
 
@@ -627,6 +634,10 @@ def main():
 
     # Sprawdź czy plik to JSON czy HTML
     input_file = args.input_file
+    if not input_file:
+        print("Error: No input file specified.")
+        return
+    
     is_json = input_file.lower().endswith('.json')
     
     # Jeśli mamy JSON i chcemy tylko otworzyć linki, pominąć przetwarzanie HTML
