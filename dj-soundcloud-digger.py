@@ -148,53 +148,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # Scrape command
-    scrape = subparsers.add_parser(
-        "scrape",
-        help="Scrape a saved SoundCloud playlist HTML file and optionally open the results.",
+    # Dig command
+    dig = subparsers.add_parser(
+        "dig",
+        help="Analyse a saved SoundCloud playlist HTML file and export the results.",
     )
-    scrape.add_argument("html_file", type=Path, help="Path to the saved SoundCloud playlist HTML file")
-    scrape.add_argument(
+    dig.add_argument("html_file", type=Path, help="Path to the saved SoundCloud playlist HTML file")
+    dig.add_argument(
         "--export",
         choices=["json", "yaml", "none"],
         default="json",
         help="Export format for categorized links (default: json)",
     )
-    scrape.add_argument(
+    dig.add_argument(
         "--output",
         type=Path,
         help="Optional path for the export file. Defaults to soundcloud_links.<ext>",
     )
-    scrape.add_argument(
-        "--open-category",
-        choices=CATEGORY_CHOICES,
-        default="all",
-        help="Category to open after scraping (default: all)",
-    )
-    scrape.add_argument(
-        "--no-open",
-        action="store_true",
-        help="Do not open links in a browser after scraping",
-    )
-    scrape.add_argument(
-        "--browser",
-        choices=BROWSER_CHOICES,
-        default="default",
-        help="Browser to use when opening links (default: system default)",
-    )
-    scrape.add_argument(
+    dig.add_argument(
         "--delay",
         type=float,
         default=0.5,
         help="Delay between track requests in seconds (default: 0.5)",
     )
-    scrape.add_argument(
+    dig.add_argument(
         "--timeout",
         type=float,
         default=20.0,
         help="HTTP request timeout in seconds (default: 20)",
     )
-    scrape.add_argument(
+    dig.add_argument(
         "--max-tracks",
         type=int,
         help="Optional limit on number of tracks to process (useful for testing)",
@@ -209,8 +192,7 @@ def build_parser() -> argparse.ArgumentParser:
     open_cmd.add_argument(
         "--category",
         choices=CATEGORY_CHOICES,
-        default="all",
-        help="Category to open (default: all)",
+        help="Category to open (prompted if omitted)",
     )
     open_cmd.add_argument(
         "--browser",
@@ -240,6 +222,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def parse_cli_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     return build_parser().parse_args(argv)
+
+
+def prompt_category_selection() -> str:
+    prompt = (
+        "Open which category? Enter one of: "
+        + ", ".join(CATEGORY_CHOICES)
+        + " (default: all): "
+    )
+    while True:
+        choice = input(prompt).strip().lower()
+        if not choice:
+            return "all"
+        for option in CATEGORY_CHOICES:
+            if option.lower() == choice:
+                return option
+        print("Please choose a valid category name.")
 
 
 def load_json_file(json_file_path: str) -> Dict[str, List[Dict[str, str]]]:
@@ -786,7 +784,7 @@ def collect_track_data(
     return categorized
 
 
-def handle_scrape(args: argparse.Namespace) -> None:
+def handle_dig(args: argparse.Namespace) -> None:
     html_file: Path = args.html_file
     if not html_file.exists():
         raise FileNotFoundError(f"HTML file not found: {html_file}")
@@ -831,19 +829,6 @@ def handle_scrape(args: argparse.Namespace) -> None:
 
     log_summary(summary)
 
-    if args.no_open:
-        LOGGER.info("Opening links skipped (--no-open).")
-        return
-
-    open_links_in_browser(
-        summary,
-        args.open_category,
-        browser=args.browser,
-        skip=0,
-        limit=None,
-        disable_open=False,
-    )
-
 
 def handle_open(args: argparse.Namespace) -> None:
     summary_file: Path = args.summary_file
@@ -851,9 +836,15 @@ def handle_open(args: argparse.Namespace) -> None:
 
     log_summary(summary)
 
+    category = args.category
+    if category is None and not args.no_open:
+        category = prompt_category_selection()
+    elif category is None:
+        category = "all"
+
     open_links_in_browser(
         summary,
-        args.category,
+        category,
         browser=args.browser,
         skip=max(0, args.skip),
         limit=args.limit,
@@ -868,8 +859,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     logging.basicConfig(level=log_level, format="%(levelname)s: %(message)s")
     LOGGER.setLevel(log_level)
 
-    if args.command == "scrape":
-        handle_scrape(args)
+    if args.command == "dig":
+        handle_dig(args)
     elif args.command == "open":
         handle_open(args)
 
