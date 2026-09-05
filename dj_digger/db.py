@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 from weakref import WeakSet
 
+from .models import track_key
 from .paths import data_dir
 from .schema import open_database
 
@@ -167,7 +168,13 @@ class Database:
     def remember_collection(self, incoming: dict, generation: str | None = None):
         """Refresh current collection fields, retaining unrelated local decisions."""
         source = incoming["source"]
-        with self.connection(write=True):
+        with self.connection(write=True) as conn:
+            provider_id = incoming.get('provider_id')
+            if provider_id:
+                alias = conn.execute('SELECT source FROM playlist_aliases WHERE provider_id=?', (str(provider_id),)).fetchone()
+                if alias is not None:
+                    source = alias['source']
+                    incoming = dict(incoming, source=source)
             if isinstance(generation, dict):
                 if generation.get(source, "initial") != self.crate_generation(source):
                     return None
@@ -178,7 +185,7 @@ class Database:
                 current = incoming
             else:
                 def key(track):
-                    return str(track["id"]) if track.get("id") else track.get("permalink_url", "")
+                    return track_key(track)
                 known = {key(track) for track in current.get("tracks", [])}
                 arrived = [key(track) for track in incoming["tracks"] if key(track) not in known]
                 if arrived:
@@ -186,8 +193,14 @@ class Database:
                 current["tracks"] = incoming["tracks"]
                 current["title"] = incoming.get("title") or current["title"]
                 current["partial"] = incoming["partial"]
+                if "preserve_order" in incoming:
+                    current["preserve_order"] = incoming["preserve_order"]
                 current["refreshed_at"] = datetime.now(UTC).isoformat(timespec="seconds")
+            if provider_id:
+                current['provider_id'] = provider_id
             self.save_crate(current)
+            if provider_id:
+                conn.execute('INSERT OR REPLACE INTO playlist_aliases VALUES(?,?)', (str(provider_id), source))
             return current
 
     @owned
@@ -238,7 +251,7 @@ class Database:
                 return False
             removed = set(record.get("removed_track_keys", []))
             for track in record.get("tracks", []):
-                key = str(track["id"]) if track.get("id") else track.get("permalink_url", "")
+                key = track_key(track)
                 if key in updates and key not in removed:
                     track.update(updates[key])
             self.save_crate(record)
@@ -256,8 +269,9 @@ class Database:
         updated = record.get("refreshed_at") or record.get("imported_at") or ""
         with self.connection(write=True) as conn:
             conn.execute(
-                """INSERT OR REPLACE INTO crates (source, title, updated, record_json)
-                   VALUES (?, ?, ?, ?)""",
+                """INSERT INTO crates (source, title, updated, record_json)
+                   VALUES (?, ?, ?, ?) ON CONFLICT(source) DO UPDATE SET
+                   title=excluded.title, updated=excluded.updated, record_json=excluded.record_json""",
                 (
                     record["source"],
                     record.get("title") or "",
@@ -366,3 +380,163 @@ class Database:
                 values,
             ).fetchone()
             return row["path"] if row and row["variants"] == 1 else None
+
+    @owned
+    def register_media(self, path: str, signature: str, *, parent_id=None) -> dict:
+        with self.connection(write=True) as conn:
+            row = conn.execute('SELECT * FROM media_files WHERE path=?', (path,)).fetchone()
+            if row is None:
+                media_id = uuid4().hex
+                conn.execute('INSERT INTO media_files(id,path,signature,parent_id) VALUES(?,?,?,?)',
+                             (media_id, path, signature, parent_id))
+            else:
+                media_id = row['id']
+                if row['signature'] != signature:
+                    conn.execute("UPDATE media_files SET signature=?,metadata_json='{}',available=1 WHERE id=?",
+                                 (signature, media_id))
+                else:
+                    conn.execute('UPDATE media_files SET available=1 WHERE id=?', (media_id,))
+            return dict(conn.execute('SELECT * FROM media_files WHERE id=?', (media_id,)).fetchone())
+
+    @owned
+    def media(self, media_id: str) -> dict | None:
+        with self.connection() as conn:
+            row = conn.execute('SELECT * FROM media_files WHERE id=?', (media_id,)).fetchone()
+            return dict(row) if row is not None else None
+
+    @owned
+    def update_media_metadata(self, media_id, signature, metadata) -> bool:
+        with self.connection(write=True) as conn:
+            return bool(conn.execute('UPDATE media_files SET metadata_json=? WHERE id=? AND signature=?',
+                                     (json.dumps(metadata), media_id, signature)).rowcount)
+
+    @owned
+    def media_values(self, media_id) -> dict:
+        with self.connection() as conn:
+            row = conn.execute('SELECT * FROM media_analysis WHERE media_id=?', (media_id,)).fetchone()
+            if row is None:
+                return {}
+            return dict(row)
+
+    @owned
+    def save_analysis(self, media_id, signature, algorithm, result) -> bool:
+        with self.connection(write=True) as conn:
+            row = conn.execute('SELECT signature FROM media_files WHERE id=?', (media_id,)).fetchone()
+            if row is None or row['signature'] != signature:
+                return False
+            conn.execute('''INSERT INTO media_analysis(media_id,signature,algorithm,result_json)
+                         VALUES(?,?,?,?) ON CONFLICT(media_id) DO UPDATE SET
+                         signature=excluded.signature,algorithm=excluded.algorithm,result_json=excluded.result_json''',
+                         (media_id, signature, algorithm, json.dumps(result)))
+            return True
+
+    @owned
+    def set_media_manual(self, media_id, values):
+        with self.connection(write=True) as conn:
+            conn.execute('''INSERT INTO media_analysis(media_id,manual_json) VALUES(?,?)
+                         ON CONFLICT(media_id) DO UPDATE SET manual_json=excluded.manual_json''',
+                         (media_id, json.dumps(values)))
+
+    @owned
+    def save_local_playlist(self, source, title, media_ids):
+        with self.connection(write=True) as conn:
+            existing = self.load_crate(source)
+            self.save_crate(existing or {'source': source, 'title': title, 'tracks': [], 'version': 2})
+            start = conn.execute('SELECT COALESCE(MAX(position),-1)+1 FROM local_playlist_items WHERE source=?', (source,)).fetchone()[0]
+            conn.executemany('INSERT INTO local_playlist_items VALUES(?,?,?)',
+                             ((source, start+i, mid) for i, mid in enumerate(media_ids)))
+
+    @owned
+    def local_playlist_media(self, source):
+        with self.connection() as conn:
+            return [dict(row) for row in conn.execute('''SELECT m.* FROM local_playlist_items p
+                   JOIN media_files m ON m.id=p.media_id WHERE p.source=? ORDER BY p.position''', (source,))]
+
+    @owned
+    def record_media_operation(self, operation_id, record):
+        with self.connection(write=True) as conn:
+            conn.execute('INSERT OR REPLACE INTO media_operations VALUES(?,?)', (operation_id, json.dumps(record)))
+
+    @owned
+    def media_operations(self):
+        with self.connection() as conn:
+            return {row['id']: json.loads(row['record_json']) for row in conn.execute('SELECT * FROM media_operations')}
+
+    @owned
+    def commit_media_replacement(self, media_id, old_path, new_path, signature, metadata):
+        with self.connection(write=True) as conn:
+            existing = conn.execute('SELECT path FROM media_files WHERE id=?', (media_id,)).fetchone()
+            if existing is None or existing['path'] not in (old_path, new_path):
+                raise ValueError('Media identity changed before replacement commit')
+            conn.execute('UPDATE media_files SET path=?,signature=?,metadata_json=? WHERE id=? AND path IN (?,?)',
+                         (new_path, signature, json.dumps(metadata), media_id, old_path, new_path))
+            conn.execute('UPDATE track_local_files SET path=? WHERE path=?', (new_path, old_path))
+            conn.execute('DELETE FROM local_files WHERE path=?', (old_path,))
+            for row in conn.execute("SELECT source,record_json FROM crates WHERE instr(record_json,?) > 0", (json.dumps(old_path, ensure_ascii=False)[1:-1],)).fetchall():
+                raw = json.loads(row['record_json'])
+                for track in raw.get('tracks', []):
+                    if track.get('local_path') == old_path:
+                        track['local_path'] = new_path
+                self.save_crate(raw)
+
+
+    @owned
+    def remember_provider_playlist(self, provider_id, incoming, generation):
+        with self.connection(write=True) as conn:
+            row = conn.execute('SELECT source FROM playlist_aliases WHERE provider_id=?', (str(provider_id),)).fetchone()
+            if row is not None:
+                incoming = dict(incoming, source=row['source'])
+            saved = self.remember_collection(incoming, generation)
+            if saved is not None:
+                conn.execute('INSERT OR REPLACE INTO playlist_aliases VALUES(?,?)', (str(provider_id), saved['source']))
+            return saved
+
+    @owned
+    def media_at_identity(self, signature):
+        info = json.loads(signature)
+        with self.connection() as conn:
+            return [dict(row) for row in conn.execute("SELECT * FROM media_files WHERE json_extract(signature,'$[0]')=? AND json_extract(signature,'$[1]')=? LIMIT 2", info[:2])]
+
+    @owned
+    def relocate_media(self, media_id, old_path, new_path, old_signature, new_signature):
+        with self.connection(write=True) as conn:
+            changed = conn.execute('UPDATE media_files SET path=?,signature=? WHERE id=? AND path=? AND signature=?',
+                                   (new_path, new_signature, media_id, old_path, old_signature)).rowcount
+            if changed:
+                conn.execute('UPDATE media_analysis SET signature=? WHERE media_id=? AND signature=?', (new_signature, media_id, old_signature))
+                conn.execute('UPDATE track_local_files SET path=? WHERE path=?', (new_path, old_path))
+            return bool(changed)
+
+    @owned
+    def observe_root(self, path, device, inode):
+        with self.connection(write=True) as conn:
+            old = conn.execute('SELECT device,inode FROM media_roots WHERE path=?', (path,)).fetchone()
+            if old is None:
+                conn.execute('INSERT INTO media_roots VALUES(?,?,?)', (path, device, inode))
+                return True
+            return (old['device'], old['inode']) == (device, inode)
+
+    @owned
+    def media_roots(self):
+        with self.connection() as conn:
+            return [dict(row) for row in conn.execute('SELECT * FROM media_roots')]
+
+    @owned
+    def mark_directory_missing(self, folder, seen, device):
+        prefix = folder.rstrip('/\\') + str(Path('/').anchor or '/')
+        # Paths are canonical absolute paths, supplied by the completed scan.
+        with self.connection(write=True) as conn:
+            rows = conn.execute('SELECT id,path,signature FROM media_files WHERE path >= ? AND path < ?', (prefix, prefix + chr(0x10ffff))).fetchall()
+            missing = [(row['id'],) for row in rows if str(Path(row['path']).parent) == folder and row['path'] not in seen and json.loads(row['signature'])[0] == device]
+            conn.executemany('UPDATE media_files SET available=0 WHERE id=?', missing)
+
+    @owned
+    def link_playlist_alias(self, provider_id, source, generations):
+        with self.connection(write=True) as conn:
+            if self.load_crate(source) is not None and generations.get(source, 'initial') == self.crate_generation(source):
+                conn.execute('INSERT OR IGNORE INTO playlist_aliases VALUES(?,?)', (str(provider_id), source))
+
+    @owned
+    def unaliased_playlists(self):
+        with self.connection() as conn:
+            return [row['source'] for row in conn.execute('SELECT source FROM crates WHERE source NOT IN (SELECT source FROM playlist_aliases)')]

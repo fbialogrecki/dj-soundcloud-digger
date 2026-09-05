@@ -61,7 +61,7 @@ class FilterController:
     def status_of(self, row: Row) -> str:
         return self.state.get(row.track.key)
 
-    def record_to_open(self, row: Row) -> LinkRecord:
+    def record_to_open(self, row: Row) -> LinkRecord | None:
         """The link ``o`` would follow: the filtered store, else the best one."""
 
         if self.playlist_state.store_filters:
@@ -70,7 +70,7 @@ class FilterController:
                     chosen = row.record_for(cat)
                     if chosen is not None:
                         return chosen
-        return row.records[0]
+        return row.records[0] if row.records else None
 
     def current_row(self) -> Row | None:
         table = self.query_one("#tracks", DataTable)

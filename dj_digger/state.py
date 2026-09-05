@@ -153,3 +153,12 @@ class TrackState:
                     self._files.pop(key, None)
                 else:
                     self._files[key] = path
+
+    def reload_file_paths(self):
+        """Refresh the mirror after a journaled replacement, invalidating old scans."""
+        with self._lock:
+            paths = self.db.all_track_local_files()
+            for key in set(paths) | set(self._files or {}):
+                if paths.get(key) != (self._files or {}).get(key):
+                    self._revisions[key] = self._revisions.get(key, 0) + 1
+            self._files = paths

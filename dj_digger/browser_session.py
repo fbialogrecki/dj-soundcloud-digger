@@ -204,7 +204,7 @@ def sync_browser_context(
         from playwright.sync_api import sync_playwright
     except ImportError as exc:
         raise AutomationError(
-            "the required Playwright dependency is missing; reinstall dj-soundcloud-digger"
+            "the required Playwright dependency is missing; reinstall dj-digger"
         ) from exc
 
     with sync_playwright() as playwright:

@@ -1,16 +1,16 @@
-# 🎧 dj-soundcloud-digger
+# 🎧 dj-digger
 
 [![Python Version](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![Built with Textual](https://img.shields.io/badge/TUI-Textual-ff69b4.svg)](https://textual.textualize.io/)
-[![Version](https://img.shields.io/badge/version-1.0.0-orange.svg)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.1.0-orange.svg)](pyproject.toml)
 
 > **A local-first playlist workflow for DJs.**
 > Turn SoundCloud playlists, likes, and artist profiles into an auditionable,
 > searchable library, then find the safest available path to download or buy
 > each track.
 
-`dj-soundcloud-digger` keeps the whole digging loop in one terminal application:
+`dj-digger` keeps the whole digging loop in one terminal application:
 collect a playlist, preview and filter it, mark decisions, match music already on
 disk, and follow verified store or download links. Your library and preferences
 stay on your machine, and checkout always stays in your hands.
@@ -73,20 +73,20 @@ dj-digger https://soundcloud.com/someone/sets/that-playlist
 
 ```bash
 # Install with audio preview; store-cart support is included
-uv tool install 'dj-soundcloud-digger[play]'
+uv tool install 'dj-digger[play]'
 ```
 
 or with `pipx`:
 
 ```bash
-pipx install 'dj-soundcloud-digger[play]'
+pipx install 'dj-digger[play]'
 ```
 
 ### From Source (Development)
 
 ```bash
-git clone https://github.com/fbialogrecki/dj-soundcloud-digger.git
-cd dj-soundcloud-digger
+git clone https://github.com/fbialogrecki/dj-digger.git
+cd dj-digger
 uv venv
 uv pip install -e '.[play,dev]'
 ```
@@ -430,3 +430,89 @@ uv run pytest -m shop_live
 ## 📄 License
 
 Distributed under the **Apache License 2.0**. See [`LICENSE`](LICENSE) for details.
+
+## Local music and club folders (1.1)
+
+Open a folder with `ctrl+f`, or use the explorer below your playlists. Files are
+loaded in pages of 250; `ctrl+n` moves to the next page. Opening a folder lists
+names first, then reads audio tags in the background. It does not analyze audio.
+Space or Enter previews a local file. FFmpeg/ffprobe must be installed and on
+PATH; playback also needs the `play` extra. WAV, AIFF/AIF, FLAC/FLA, MP3, AAC,
+and M4A/MP4 audio are supported, subject to successful decoder inspection.
+
+| Key | Local library action |
+| --- | --- |
+| `ctrl+f` | Open a directory by path |
+| `ctrl+n` | Next directory page (wrap to first) |
+| `ctrl+p` | Pin the current directory |
+| `ctrl+t` | Sidebar split: 50/50, 70/30, 30/70 |
+| `ctrl+r` | Show playlists, explorer, or both; small terminals show one section |
+| `ctrl+l` | Add selected local files to a named local playlist; same name appends |
+| `j` | Estimate BPM and key for selected local files, or the visible page |
+| `ctrl+k` | Edit manual BPM/key, double/halve tempo, or clear overrides |
+| `ctrl+e` | Inspect and export local audio for club players |
+| `ctrl+u` | Review/resume the most recent unfinished folder export |
+| `i` | Import playlists created by a SoundCloud profile |
+
+Install analysis with `pip install 'dj-digger[play,analyze]'` (or the equivalent
+pipx/uv tool command). Analysis is optional and its libraries load in a separate
+process only when requested. Results are estimates; ambiguous rhythm/key and
+silence can return no value. Manual values take precedence, followed by current
+analysis, then tags. Analysis never writes audio tags or rekordbox data.
+
+Audio export defaults to **WAV, maximum 24-bit / 48 kHz, a NEW folder**. The
+format applies to files requiring conversion. Compatible MP3/AAC and compatible
+lossless files are kept rather than unnecessarily transcoded. All selected files
+are copied, including unchanged files; original directories are preserved. With
+no explicit selection, an open folder exports all matching files, including pages
+not currently displayed. Recursive inclusion is an explicit checkbox.
+
+The dialog shows manufacturer-documented profile compatibility and then the
+compatibility of the actual planned set, including retained MP3/AAC parameters.
+For example, 32 kHz MP3 can remain untouched but excludes CDJ-3000/3000X from the
+actual compatible list. Unverified parameters are never shown as compatible.
+This is **audio-file compatibility**, not hardware testing, a rekordbox export,
+or approval of any USB filesystem. You can choose a mounted USB directory as
+the destination; the app never formats a drive.
+
+Replacement is optional and must be selected afresh for every operation. It
+keeps a temporary original until the new file is verified and SQLite is updated,
+then removes that original. Recovery preserves ambiguous files. Successful
+replacement leaves no permanent backup. Symbolic/hard links and playing or
+prefetched files cannot be replaced. Conversion never silently upsamples,
+downmixes, normalizes, or converts a lossy file to improve its supposed quality.
+Exceptions and omitted metadata are listed in the operation report.
+
+Profile playlist import is separate from the existing profile-track dig. Public
+playlists do not require login. Private playlists require a valid session for the
+profile owner. This relies on SoundCloud's undocumented API: an incomplete or
+missing-track response preserves the old playlist and is reported. No external
+download gates are resolved by a mass import.
+
+### Upgrade from the old package name
+
+Close every running instance first. **Uninstall `dj-soundcloud-digger` before
+installing `dj-digger`**: both distributions own the same module and CLI script.
+Do not install them together. Choose the commands for the manager you used:
+
+```sh
+# pip, inside the same virtual environment
+python -m pip uninstall dj-soundcloud-digger
+python -m pip install 'dj-digger[play,analyze]'
+
+# pipx
+pipx uninstall dj-soundcloud-digger
+pipx install 'dj-digger[play,analyze]'
+
+# uv tools
+uv tool uninstall dj-soundcloud-digger
+uv tool install 'dj-digger[play,analyze]'
+```
+
+The `dj_digger` module, `dj-digger` command, configuration and data directories
+keep their names. Schema 0/1 databases with the recognized 1.0 shape get a
+verified SQLite backup including committed WAL data before migration to schema
+2. Unknown databases are refused without changes. Downgrading requires consciously
+restoring that backup while the app is closed; there is no automatic downgrade.
+See [release procedure](docs/implementation/release-1.1.md) and
+[deck rule sources](docs/implementation/deck-sources.md).

@@ -219,7 +219,7 @@ class SoundCloudClient:
                     )
                 if response.status_code >= 400:
                     raise SoundCloudError(
-                        f"SoundCloud returned HTTP {response.status_code} for {url}"
+                        f"SoundCloud returned HTTP {response.status_code} for {url}", status_code=response.status_code
                     )
 
                 try:
@@ -559,6 +559,7 @@ class SoundCloudClient:
                 tracks=tracks,
                 title=payload.get("title") or url,
                 declared_count=declared,
+                provider_id=payload.get("id"),
             )
 
         raise SoundCloudError(

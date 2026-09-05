@@ -120,6 +120,14 @@ class CrateController:
         self.playlist_state.crate = record
         records = links_module.categorise_all(record.active_tracks)
         self.load_records(records, title=record.title)
+        if record.preserve_order or any(track.local_id for track in record.active_tracks):
+            self.set_tracks(record.active_tracks)
+
+    def set_tracks(self, tracks) -> None:
+        self.playlist_state.rows = [Row(index + 1, track, [] if track.local_id else links_module.categorise_all([track])) for index, track in enumerate(tracks)]
+        self.playlist_state.present = links_module.present_categories(self.all_records())
+        self.playlist_state.store_filters.clear()
+        self.refresh_rows(keep_cursor=False)
 
     def load_records(self, records: Sequence[LinkRecord], *, title: str = "") -> None:
         self.playlist_state._view_generation += 1
@@ -142,6 +150,9 @@ class CrateController:
             return
         if not header.source:
             self.notify("This playlist has no source to refresh from", severity="warning")
+            return
+        if header.source.startswith('local-playlist:'):
+            self.run_worker(self.open_crate(header))
             return
         self._start_dig(header.source)
 
@@ -220,6 +231,9 @@ class CrateController:
         """Rebuild the rows from the crate, keeping filters and cursor in place."""
 
         if self.playlist_state.crate is None:
+            return
+        if self.playlist_state.crate.preserve_order or any(track.local_id for track in self.playlist_state.crate.active_tracks):
+            self.set_tracks(self.playlist_state.crate.active_tracks)
             return
         self._set_records(links_module.categorise_all(self.playlist_state.crate.active_tracks))
         self.refresh_rows()

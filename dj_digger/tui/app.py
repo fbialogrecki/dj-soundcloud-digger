@@ -90,12 +90,12 @@ class DiggerApp(App):
     }
     /* Centred over the list it heads, with a blank row under it: the crate
        names started immediately below and read as one more crate. */
-    #sidebar-title {
+    #sidebar-title, #explorer-title {
         padding: 0 1;
-        margin-bottom: 1;
         text-align: center;
         color: $text-muted;
     }
+    #sidebar-title { margin-bottom: 1; }
     /* Auto height so the add button sits right under the last crate, not pinned
        to the bottom of the sidebar. */
     #crates {
@@ -131,7 +131,7 @@ class DiggerApp(App):
     .crate-icon:hover {
         background: $accent;
     }
-    #crate-add {
+    #crate-add, #folder-open, #folder-next {
         width: 1fr;
         height: 1;
         border: none;
@@ -140,7 +140,7 @@ class DiggerApp(App):
         content-align: left middle;
         padding: 0 1;
     }
-    #crate-add:hover {
+    #crate-add:hover, #folder-open:hover, #folder-next:hover {
         background: $accent;
         color: $text;
     }
@@ -162,6 +162,13 @@ class DiggerApp(App):
     DataTable {
         height: 1fr;
     }
+    """
+
+    CSS = CSS + """
+    #playlist-pane, #explorer-pane { height: 50%; }
+    #explorer { height: 1fr; scrollbar-size: 1 1; }
+    #explorer-title { height: 1; }
+    #folder-next { display: none; }
     """
 
     BINDINGS = [
@@ -470,9 +477,16 @@ class DiggerApp(App):
         yield PlayerControls(self.player, id="player-controls")
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
-                yield Static("Playlists", id="sidebar-title")
-                yield ListView(id="crates")
-                yield Button("+ Add playlist", id="crate-add", tooltip="Add a playlist (d)")
+                with Vertical(id="playlist-pane"):
+                    yield Static("Playlists", id="sidebar-title")
+                    yield ListView(id="crates")
+                    yield Button("+ Add playlist", id="crate-add", tooltip="Add a playlist (d)")
+                with Vertical(id="explorer-pane"):
+                    yield Static("Local files", id="explorer-title")
+                    from textual.widgets import Tree
+                    yield Tree("Directories", id="explorer")
+                    yield Button("Next page", id="folder-next")
+                    yield Button("+ Open folder", id="folder-open")
             with Vertical(id="main"):
                 yield SearchInput(placeholder="Filter by artist, title, genre, tag or label", id="search")
                 yield TrackTable(id="tracks", cursor_type="row", zebra_stripes=True)
@@ -497,6 +511,8 @@ class DiggerApp(App):
         # binding Textual's Footer sets up on its own keys.
         footer = self.query_one(FittedFooter)
         footer.call_next(footer.recompose)
+        if hasattr(self, "local_controller"):
+            self.local_controller.layout()
 
     def _handle_exception(self, error: Exception) -> None:
         """Put the crash in the log before Textual tears the screen down.
@@ -537,6 +553,15 @@ class DiggerApp(App):
             self.theme = self.config.theme
         else:
             self.palette = palette_for(self.get_css_variables(), self.current_theme)
+        from .local import LocalController
+        self.local_controller = LocalController(
+            services=self.services, playlist_state=self.playlist_state, crate_controller=self.crate_controller,
+            audio_state=self.audio_state, config=self.config, jobs=self.jobs,
+            notify=self.notify, push_screen=self.push_screen, run_worker=self.run_worker, query_one=self.query_one,
+            refresh_rows=self.table_controller.refresh_rows, selected_rows=self.filter_controller.selected_rows,
+            current_row=self.filter_controller.current_row,
+            build_columns=self.table_controller.rebuild_columns)
+        await self.local_controller.mount()
         await self.crate_controller.reload_sidebar()
         if not self.playlist_state.rows:
             # Someone with a library wants to see it, not be interrogated.
@@ -749,8 +774,48 @@ class DiggerApp(App):
     def on_list_view_selected(self, *args, **kwargs):
         return self.crate_controller.on_list_view_selected(*args, **kwargs)
 
-    def on_button_pressed(self, *args, **kwargs):
-        return self.crate_controller.on_button_pressed(*args, **kwargs)
+    def on_button_pressed(self, event):
+        if event.button.id == 'folder-next':
+            event.stop()
+            self.local_controller.next_page()
+            return
+        if event.button.id == 'folder-open':
+            event.stop()
+            self.local_controller.choose_folder()
+            return
+        return self.crate_controller.on_button_pressed(event)
+
+    def on_tree_node_selected(self, event):
+        if event.control.id == 'explorer' and event.node.data is not None:
+            event.stop()
+            self.local_controller.open(event.node.data, node=event.node)
+
+    def action_local_folder(self):
+        self.local_controller.choose_folder()
+
+    def action_local_export(self):
+        self.local_controller.export_options()
+
+    def action_local_analyze(self):
+        self.local_controller.analyze()
+
+    def action_local_edit(self):
+        self.local_controller.edit()
+
+    def action_local_playlist(self):
+        self.local_controller.save_playlist()
+
+    def action_local_page(self):
+        self.local_controller.next_page()
+
+    def action_local_pin(self):
+        self.local_controller.pin()
+
+    def action_local_split(self):
+        self.local_controller.resize_split()
+
+    def action_profile_playlists(self):
+        self.local_controller.profile()
 
     def action_remove_track(self, *args, **kwargs):
         self.run_worker(self.crate_controller.action_remove_track(*args, **kwargs), description="remove_track")
@@ -831,6 +896,9 @@ class DiggerApp(App):
         self.run_worker(self.download_controller.action_batch_download(*args, **kwargs), description="batch_download")
 
     def action_open_link(self, *args, **kwargs):
+        row = self.filter_controller.current_row()
+        if row is not None and row.track.local_id:
+            return self.playback_controller.action_play_pause()
         return self.opening_controller.action_open_link(*args, **kwargs)
 
     def action_search(self, *args, **kwargs):
@@ -865,3 +933,9 @@ class DiggerApp(App):
 
     def update_status(self):
         self.table_controller.update_status()
+
+    def action_local_resume(self):
+        self.run_worker(self.local_controller.resume())
+
+    def action_local_section(self):
+        self.local_controller.toggle_section()

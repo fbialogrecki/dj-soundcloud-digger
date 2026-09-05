@@ -158,7 +158,7 @@ def _create_soundiiz_import(
         },
         json={
             "title": title or "DJ Digger Beatport playlist",
-            "sourceName": "dj-soundcloud-digger",
+            "sourceName": "dj-digger",
             "destination": "beatport",
             "tracklist": [_soundiiz_metadata(request) for request in selected],
         },

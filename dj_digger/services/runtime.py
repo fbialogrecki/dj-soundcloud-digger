@@ -186,6 +186,8 @@ class ApplicationServices:
         self._closed = True
         if self._player is not None:
             self._close_resource(self._player)
+        from ..local_audio import close_all
+        close_all()
         if self._client is not None:
             self._close_resource(self._client)
             self._client = None

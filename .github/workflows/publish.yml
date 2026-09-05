@@ -36,8 +36,35 @@ jobs:
       # --extra dev, because pytest lives in an optional dependency rather than
       # in the default set: without it uv resolves an environment that cannot
       # run the suite at all.
+      - name: Install FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: command -v ffmpeg || brew install ffmpeg
+      - name: Install FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --yes --no-progress
       - name: Run tests
-        run: uv run --extra dev --python ${{ matrix.python-version }} pytest
+        run: uv run --extra dev --extra analyze --python ${{ matrix.python-version }} pytest
+      - name: Build and verify isolated installation
+        run: |
+          uv build
+          uv run --no-sync --python ${{ matrix.python-version }} python scripts/package_smoke.py
+      - name: Check out the pinned legacy informational package
+        if: matrix.python-version == '3.14'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 0bbde9994f96878ab121f1b3d522bceb839cc44f
+          path: .legacy-release
+          persist-credentials: false
+      - name: Verify pip, pipx and uv name migration
+        if: matrix.python-version == '3.14'
+        run: |
+          uv build --project .legacy-release --out-dir .legacy-dist
+          uv run --no-sync python scripts/tool_migration_smoke.py .legacy-dist/dj_soundcloud_digger-1.0.1-py3-none-any.whl dist/dj_digger-1.1.0-py3-none-any.whl --manager pip
+          uv run --no-sync python scripts/tool_migration_smoke.py .legacy-dist/dj_soundcloud_digger-1.0.1-py3-none-any.whl dist/dj_digger-1.1.0-py3-none-any.whl --manager pipx
+          uv run --no-sync python scripts/tool_migration_smoke.py .legacy-dist/dj_soundcloud_digger-1.0.1-py3-none-any.whl dist/dj_digger-1.1.0-py3-none-any.whl --manager uv
 
   pypi-publish:
     name: Upload release to PyPI

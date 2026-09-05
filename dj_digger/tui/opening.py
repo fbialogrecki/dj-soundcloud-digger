@@ -113,6 +113,9 @@ class OpeningController:
         if row is None:
             return
         record = self.record_to_open(row)
+        if record is None:
+            self.notify('Local audio: press Space to play', timeout=3)
+            return
         if record.link_text == links_module.NO_STORE_LINK:
             self.notify("No link for this track - opening it on SoundCloud", timeout=3)
         elif record.link_text == links_module.FREE_DOWNLOAD:
@@ -628,6 +631,7 @@ class OpeningController:
         if not self._main_available():
             return None
         if urls is None:
+            rows = [row for row in rows if self.record_to_open(row) is not None]
             urls = [self.record_to_open(row).link_url for row in rows]
         handle = self.start_job("Opening", len(rows), cancel=Event())
         return self._open_visible_worker(deepcopy(rows), list(urls), self.browser, handle)

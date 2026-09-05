@@ -580,7 +580,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     _configure_logging(args.log_level, args.log_file)
 
+    lock = None
     try:
+        from .instance import InstanceLock
+        from .paths import data_dir
+        lock = InstanceLock(data_dir() / "instance.lock")
         if args.command == "dig":
             return handle_dig(args)
         if args.command == "open":
@@ -595,5 +599,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         LOGGER.info("Interrupted.")
         return 130
+    finally:
+        if lock is not None:
+            lock.close()
 
     return 0

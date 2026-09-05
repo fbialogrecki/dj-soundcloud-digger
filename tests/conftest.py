@@ -63,6 +63,9 @@ def isolate_user_data(tmp_path, monkeypatch):
     # Everything that goes through paths.data_dir() / config_dir() - the store
     # browser profile, cart diagnostics - lands under tmp_path as well; a test
     # run once left eight diagnostics folders in the developer's real data dir.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg-cache"))
+    from dj_digger.tui.local import LocalController
+    monkeypatch.setattr(LocalController, "mounts", staticmethod(lambda: []))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
     monkeypatch.setattr(config, "default_config_path", lambda: config_path)

@@ -68,6 +68,8 @@ class PlaybackController:
         self.run_worker = run_worker
         self.update_status = update_status
         self.worker_scope = worker_scope
+        self._playing_row = None
+        self._requested_row = None
 
     @property
     def animation_level(self):
@@ -143,7 +145,7 @@ class PlaybackController:
         if index is None:
             return
         track = self.playlist_state.visible_rows[index].track
-        if not track.id or self.audio_state._preparing == track.key:
+        if (not track.id and not track.local_id) or self.audio_state._preparing == track.key:
             return
         if self.audio_state._prepared is not None and self.audio_state._prepared.key == track.key:
             return
@@ -154,9 +156,14 @@ class PlaybackController:
     def prepare_track_work(self, track: Track, generation: int | None = None) -> None:
         with self.worker_scope():
             try:
-                stream = resolve_stream(self.client, track.id)
-                samples = fetch_waveform(self.client, stream.waveform_url)
-                source = open_source(self.client.session, stream.url)
+                if track.local_id and track.local_path:
+                    from ..local_audio import prepare_local
+                    prepared = prepare_local(track)
+                    stream, samples, source = prepared.stream, prepared.waveform, prepared.source
+                else:
+                    stream = resolve_stream(self.client, track.id)
+                    samples = fetch_waveform(self.client, stream.waveform_url)
+                    source = open_source(self.client.session, stream.url)
             except Exception as exc:
                 # Nothing is owed here: if this fails the track loads the ordinary
                 # way in its own time, and says so then.
@@ -218,6 +225,11 @@ class PlaybackController:
         if loaded is None:
             return None
         for index, row in enumerate(self.playlist_state.visible_rows):
+            if row is self._playing_row and row.track.key == loaded.track.key:
+                return index
+        if self._playing_row is not None:
+            return None
+        for index, row in enumerate(self.playlist_state.visible_rows):
             if row.track.key == loaded.track.key:
                 return index
         return None
@@ -246,7 +258,8 @@ class PlaybackController:
         if row is None:
             return
         loaded = self.player.loaded
-        if loaded is not None and loaded.track.key == row.track.key:
+        if (loaded is not None and loaded.track.key == row.track.key
+                and (self._playing_row is None or self._playing_row is row)):
             self.audio_state._playback_generation += 1
             self._player_bar().message = ""
             self._player_op(self.player.toggle)
@@ -286,8 +299,9 @@ class PlaybackController:
             self._paint_key(was_playing)
 
     def _start_playback(self, track: Track) -> None:
+        self._requested_row = next((row for row in self.playlist_state.visible_rows if row.track is track), None)
         self.audio_state._playback_generation += 1
-        if not track.id:
+        if not track.id and not track.local_id:
             self.notify("No track id, so there is nothing to stream", timeout=4)
             return
         self._wake()
@@ -312,10 +326,15 @@ class PlaybackController:
             """
 
             try:
-                stream = resolve_stream(self.client, track.id)
-                samples = fetch_waveform(self.client, stream.waveform_url)
-                source = open_source(self.client.session, stream.url)
-            except (SoundCloudError, PlaybackUnavailable, OSError) as exc:
+                if track.local_id and track.local_path:
+                    from ..local_audio import prepare_local
+                    prepared = prepare_local(track)
+                    stream, samples, source = prepared.stream, prepared.waveform, prepared.source
+                else:
+                    stream = resolve_stream(self.client, track.id)
+                    samples = fetch_waveform(self.client, stream.waveform_url)
+                    source = open_source(self.client.session, stream.url)
+            except (SoundCloudError, PlaybackUnavailable, OSError, RuntimeError) as exc:
                 self.call_from_thread(self._playback_failed, str(exc), generation)
                 return
             try:
@@ -323,6 +342,23 @@ class PlaybackController:
             except RuntimeError:
                 if source is not None:
                     source.close()
+                return
+    def _local_waveform_work(self, loaded, source):
+        from ..local_audio import waveform
+        class Closed:
+            def is_set(self):
+                return source._closed
+        with self.worker_scope():
+            try:
+                samples = waveform(loaded.track.local_path, Closed())
+                self.call_from_thread(self._waveform_ready, loaded, samples)
+            except Exception as exc:
+                LOGGER.debug('Local waveform unavailable: %s', exc)
+
+    def _waveform_ready(self, loaded, samples):
+        if self.player.loaded is loaded:
+            loaded.waveform = samples
+            self._player_bar().refresh_bar()
 
     def _audio_ready(
         self, track: Track, stream: Stream, samples: list[int], source=None, generation: int | None = None
@@ -335,7 +371,7 @@ class PlaybackController:
         bar.message = ""
         previously_playing = self._playing_key()
         try:
-            self.player.load(track, stream, self.client.session, samples, source)
+            self.player.load(track, stream, None if track.local_id else self.client.session, samples, source)
             self.player.play()
         except PlaybackUnavailable as exc:
             self._playback_failed(str(exc))
@@ -343,6 +379,7 @@ class PlaybackController:
         except Exception as exc:  # a bad stream must not take the app down
             self._playback_failed(f"Could not start the stream ({exc})")
             return
+        self._playing_row = self._requested_row
         # Resolving the stream takes about half a second, and a frame landing in
         # the middle of it finds nothing playing and puts the timer back to
         # sleep - so this is where it has to be woken, not where it was asked for.
@@ -354,6 +391,10 @@ class PlaybackController:
         self._paint_key(track.key)
         self._focus_playing_track()
         bar.refresh_bar()
+        if track.local_id and source is not None:
+            loaded = self.player.loaded
+            self.run_worker(lambda: self._local_waveform_work(loaded, source),
+                            thread=True, group='local-waveform', exclusive=True)
 
     def _playback_failed(self, message: str, generation: int | None = None) -> None:
         if generation is not None and generation != self.audio_state._playback_generation:

@@ -4,7 +4,7 @@ from pathlib import Path
 
 from ..crate_models import CrateHeader, CrateRecord
 from ..models import GOT, NEW
-from ..scanner import SCAN_BATCH, LocalScanner
+from ..scanner import SCAN_BATCH, LocalScanner, confirmed_missing
 from ..state import FileMatch
 
 
@@ -18,6 +18,11 @@ class LibraryService:
 
     def load(self, source):
         raw = self.state.db.load_crate(source.strip())
+        if raw is not None and source.startswith('local-playlist:'):
+            from dataclasses import asdict
+
+            from .local_library import media_track
+            raw['tracks'] = [asdict(media_track(self.state.db, record)) for record in self.state.db.local_playlist_media(source)]
         return CrateRecord.from_json(raw) if raw is not None else None
 
     def reset(self, keys):
@@ -26,7 +31,8 @@ class LibraryService:
 
     def delete(self, source):
         record = self.load(source)
-        self.reset([track.key for track in record.tracks] if record else [])
+        if not source.startswith('local-playlist:'):
+            self.reset([track.key for track in record.tracks] if record else [])
         self.state.db.delete_crate(source.strip())
 
     def remember_beatport(self, source, generation, outcome):
@@ -35,12 +41,12 @@ class LibraryService:
 
     def remove_tracks(self, source, generation, keys, *, removed):
         raw = self.state.db.set_removed_tracks(source, generation, keys, removed)
-        return CrateRecord.from_json(raw) if raw is not None else None
+        return self.load(source) if raw is not None else None
 
     def forget_missing(self, track):
         observed = self.state.observe_file(track.key)
         path = observed.path or track.local_path
-        if not path or Path(path).is_file():
+        if not path or not confirmed_missing(Path(path), self.state.db):
             return False
         self.state.apply_file_matches([FileMatch(track.key, None, False, True, observed.revision)])
         track.local_path = self.state.local_file(track.key)
@@ -72,7 +78,7 @@ class LibraryService:
         for track in tracks:
             observed = self.state.observe_file(track.key)
             remembered = observed.path or track.local_path
-            stale = bool(remembered) and not Path(remembered).is_file()
+            stale = bool(remembered) and confirmed_missing(Path(remembered), self.state.db)
             if remembered and not stale:
                 path, confident = remembered, True
             else:

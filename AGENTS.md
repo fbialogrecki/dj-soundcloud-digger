@@ -1,6 +1,6 @@
 # AGENTS.md
 
-Repository-wide routing and guardrails for `dj-soundcloud-digger`, a Python 3.12+
+Repository-wide routing and guardrails for `dj-digger`, a Python 3.12+
 terminal crate-digging CLI/TUI.
 
 ## Source of truth

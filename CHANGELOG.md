@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### 1.1.0 — dj-digger
+
+- Local file explorer, paginated folder views, pinned directories and local playlists.
+- Local FFmpeg playback, independent waveform caching and BPM/key analysis with manual overrides.
+- Manufacturer-based deck profiles, verified complete-folder audio export and journaled replacement/recovery.
+- Public/owner-private SoundCloud profile playlist import with stable provider identity and partial-response protection.
+- Schema 2 migration with consistent SQLite backups and a CLI instance lock.
+- Distribution/repository rename to dj-digger; module, CLI and data directories remain unchanged.
+
 ## 1.0.0
 
 ### Added

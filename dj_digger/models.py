@@ -42,6 +42,15 @@ def check_cancelled(cancel: threading.Event | None) -> None:
     if cancel is not None and cancel.is_set():
         raise Cancelled()
 
+def track_key(value) -> str:
+    """One identity rule for live tracks and persisted snapshots."""
+    get = value.get if isinstance(value, dict) else lambda name, default=None: getattr(value, name, default)
+    local_id = get("local_id")
+    if local_id:
+        return f"local:{local_id}"
+    return str(get("id")) if get("id") else (get("permalink_url") or "")
+
+
 @dataclass
 class Track:
     """A SoundCloud track, however it was discovered."""
@@ -64,6 +73,7 @@ class Track:
     # Links found outside the structured fields, e.g. scraped from a track page.
     extra_links: list[tuple[str, str]] = field(default_factory=list)
     local_path: str | None = None
+    local_id: str | None = None
     # What a DJ sorts a crate by. SoundCloud fills these in for many uploads
     # and leaves them empty for the rest, so every one has an "unknown" value.
     bpm: float | None = None
@@ -75,7 +85,7 @@ class Track:
     def key(self) -> str:
         """Stable identity used for persisted status, across playlists."""
 
-        return str(self.id) if self.id else self.permalink_url
+        return track_key(self)
 
     @property
     def free_download(self) -> bool:
@@ -167,6 +177,7 @@ class Crate:
     tracks: list[Track] = field(default_factory=list)
     title: str = ""
     declared_count: int | None = None
+    provider_id: int | None = None
 
 
 @dataclass

@@ -61,7 +61,7 @@ def _import_miniaudio():
         import miniaudio
     except ImportError as exc:  # pragma: no cover - depends on the install
         raise PlaybackUnavailable(
-            "Audio preview needs miniaudio: pip install 'dj-soundcloud-digger[play]'"
+            "Audio preview needs miniaudio: pip install 'dj-digger[play]'"
         ) from exc
     return miniaudio
 
@@ -452,6 +452,8 @@ class Player:
         # the buffered track and put a connection in front of every seek.
         if self._source is None:
             self._source = open_source(self._session, self._loaded.stream.url)
+        if hasattr(self._source, "stream"):
+            return self._source.stream(seek_frame)
         return miniaudio.stream_any(
             self._source,
             source_format=miniaudio.FileFormat.MP3,
@@ -500,7 +502,7 @@ class Player:
                 first = False
                 if not len(chunk):
                     raise StopIteration
-                self._frames += len(chunk) // CHANNELS
+                self._frames += (self._source.last_frames if hasattr(self._source, "last_frames") else len(chunk) // CHANNELS)
                 self._measure(chunk)
                 volume = self.volume
                 out = (
@@ -566,6 +568,8 @@ class Player:
             self._offset = 0.0
             self._frames = 0
             self._ended = False
+            if hasattr(self._source, "restart"):
+                self._source.restart(0)
         if self._generator is None:
             # Reopening the socket costs about half a second, so a plain resume
             # keeps the existing generator and only a seek reopens it.

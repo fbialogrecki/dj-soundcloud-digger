@@ -290,7 +290,7 @@ class CartBrowserSession:
             from playwright.async_api import async_playwright
         except ImportError as exc:
             raise AutomationError(
-                "the required Playwright dependency is missing; reinstall dj-soundcloud-digger"
+                "the required Playwright dependency is missing; reinstall dj-digger"
             ) from exc
         if self._playwright is None:
             self._playwright = await async_playwright().start()

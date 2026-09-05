@@ -32,6 +32,8 @@ class CrateRecord:
     imported_at: str = ""
     refreshed_at: str | None = None
     partial: bool = False
+    preserve_order: bool = False
+    provider_id: int | None = None
 
     @property
     def active_tracks(self) -> list[Track]:
@@ -39,6 +41,8 @@ class CrateRecord:
         kept = [track for track in self.tracks if track.key not in removed]
         # What the last refresh added goes to the top; sorted is stable, so the
         # playlist's own order survives inside each half.
+        if self.preserve_order or self.source.startswith("local-playlist:"):
+            return kept
         arrived = set(self.new_track_keys)
         return sorted(kept, key=lambda track: track.key not in arrived)
 
@@ -58,6 +62,7 @@ class CrateRecord:
             tracks=list(crate.tracks),
             imported_at=_now(),
             partial=partial,
+            provider_id=crate.provider_id,
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -75,6 +80,8 @@ class CrateRecord:
             imported_at=data.get("imported_at") or "",
             refreshed_at=data.get("refreshed_at"),
             partial=bool(data.get("partial")),
+            preserve_order=bool(data.get("preserve_order")),
+            provider_id=data.get("provider_id"),
         )
 
 

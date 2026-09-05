@@ -56,6 +56,8 @@ def _finish_or_exit(grace: float, code: int) -> None:
             names = ", ".join(thread.name for thread in _lingering_threads())
             LOGGER.warning("Forcing exit: %s still running", names)
             logging.shutdown()
+            from ..media_processes import terminate_owned
+            terminate_owned()
             HARD_EXIT(code)
             return
         time.sleep(0.1)
@@ -67,6 +69,8 @@ def _interrupt_again(_signum, _frame) -> None:
     # someone watching a shutdown that is taking too long.
     LOGGER.warning("Interrupted again during shutdown, exiting now")
     logging.shutdown()
+    from ..media_processes import terminate_owned
+    terminate_owned()
     HARD_EXIT(130)
 
 
@@ -88,6 +92,8 @@ def run_tui(
     # It never closes resources underneath a live worker.
     def force_shutdown():
         LOGGER.warning("Forcing exit: application teardown exceeded its deadline")
+        from ..media_processes import terminate_owned
+        terminate_owned()
         HARD_EXIT(0)
 
     guard = threading.Timer(grace, force_shutdown)

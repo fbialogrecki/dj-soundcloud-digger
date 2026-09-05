@@ -226,10 +226,11 @@ class PlayerBar(Static):
         self.message = ""
         self.meter = LevelMeter()
         self.wanted_height = 0
-        # The glyphs for the loaded track at the current width, which only need
-        # rebuilding when one of those two changes.
+        # Cache glyphs by track, width and peak data. Local peaks arrive after
+        # playback starts, so an initially empty shape must be invalidated.
         self._shape: list[str] = []
         self._shape_for = (None, 0)
+        self._shape_samples = None
 
     def refresh_bar(self) -> None:
         self.update(self._content())
@@ -271,9 +272,10 @@ class PlayerBar(Static):
     def _rows(self, loaded: Loaded) -> list[str]:
         width = self._bar_width()
         wanted = (loaded.track.key, width)
-        if self._shape_for != wanted:
+        if self._shape_for != wanted or self._shape_samples is not loaded.waveform:
             self._shape = waveform_rows(loaded.waveform, width)
             self._shape_for = wanted
+            self._shape_samples = loaded.waveform
         return self._shape
 
     def _bar_width(self) -> int:

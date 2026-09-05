@@ -73,7 +73,8 @@ class LocalScanner:
         scanned = 0
         pending: list[tuple[str, float, str]] = []
         seen: set[str] = set()
-        scanned_roots: list[Path] = []
+        scanned_directories: set[Path] = set()
+        visited: set[tuple[int, int]] = set()
 
         for root_dir in self.directories:
             if cancel is not None and cancel.is_set():
@@ -88,7 +89,8 @@ class LocalScanner:
             # which walked into linked folders too.
             # ponytail: a symlinked audio file is keyed by the link's path now.
             root = root_dir.resolve()
-            scanned_roots.append(root)
+            root_stat = root.stat()
+            same_volume = self.db.observe_root(str(root), root_stat.st_dev, root_stat.st_ino)
             for dirpath, _dirs, names in root.walk(
                 follow_symlinks=True, on_error=self._note_error
             ):
@@ -96,6 +98,19 @@ class LocalScanner:
                     self.db.upsert_local_files(pending)
                     self._refresh_exact_paths()
                     return scanned
+                try:
+                    info = dirpath.stat()
+                except OSError as exc:
+                    self._note_error(exc)
+                    _dirs.clear()
+                    continue
+                identity = (info.st_dev, info.st_ino)
+                if identity in visited:
+                    _dirs.clear()
+                    continue
+                visited.add(identity)
+                if same_volume:
+                    scanned_directories.add(dirpath)
                 for name in names:
                     if cancel is not None and cancel.is_set():
                         self.db.upsert_local_files(pending)
@@ -122,7 +137,7 @@ class LocalScanner:
             path
             for path in cached
             if path not in seen
-            and any(Path(path).is_relative_to(root) for root in scanned_roots)
+            and Path(path).parent in scanned_directories
         ]
         for path in missing:
             self._stale_stems.add(cached[path][1])
@@ -193,6 +208,8 @@ class LocalScanner:
                 path = candidates[0]
                 if Path(path).is_file():
                     return path
+                if not confirmed_missing(Path(path), self.db):
+                    return None
                 self._stale_stems.add(normalized_stem)
                 self.db.delete_local_files([path])
                 candidates.remove(path)
@@ -200,6 +217,8 @@ class LocalScanner:
         while path := find(normalized_stem, *more):
             if Path(path).is_file():
                 return path
+            if not confirmed_missing(Path(path), self.db):
+                return None
             self._stale_stems.add(normalized_stem)
             self.db.delete_local_files([path])
         return None
@@ -210,3 +229,18 @@ class LocalScanner:
         return exact in self._stale_stems or (
             len(title) >= 6 and title in self._stale_stems
         )
+
+
+def confirmed_missing(path: Path, db=None) -> bool:
+    """Absence is established only by a successful complete parent listing."""
+    try:
+        if db is not None:
+            for root in db.media_roots():
+                if path.is_relative_to(root['path']):
+                    stat = Path(root['path']).stat()
+                    if (stat.st_dev, stat.st_ino) != (root['device'], root['inode']):
+                        return False
+        with os.scandir(path.parent) as entries:
+            return all(entry.name != path.name for entry in entries)
+    except OSError:
+        return False

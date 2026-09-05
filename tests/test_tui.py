@@ -317,6 +317,7 @@ def test_choosing_a_theme_in_settings_persists_it(records, state):
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("s")
+            await app.workers.wait_for_complete()
             await pilot.pause()
             assert isinstance(app.screen, SettingsScreen)
             app.screen.query_one("#input-theme", Select).value = "nord"
@@ -1010,7 +1011,7 @@ def test_soundiiz_import_posts_the_tracklist_and_returns_its_review_url(monkeypa
     assert posted["url"] == "https://soundiiz.com/go/import-playlist"
     assert posted["json"] == {
         "title": "Dig finds",
-        "sourceName": "dj-soundcloud-digger",
+        "sourceName": "dj-digger",
         "destination": "beatport",
         "tracklist": [{"title": "Lights On", "artists": ["Revan"]}],
     }
@@ -3077,12 +3078,11 @@ def test_gate_profile_wizard_retries_a_single_download_at_most_once(
                 app.screen.query_one("#gate-profile-name", Input).value = "Filip"
                 app.screen.query_one("#gate-profile-email", Input).value = "filip@example.com"
                 await pilot.click("#gate-profile-save")
-                for _ in range(20):
-                    await pilot.pause()
-                    if state.get(row.track.key) == GOT:
-                        break
+                await asyncio.wait_for(worker.wait(), timeout=30)
+                await pilot.pause()
             else:
                 await pilot.click("#gate-profile-cancel")
+                await asyncio.wait_for(worker.wait(), timeout=30)
                 await pilot.pause()
 
     run(scenario)
@@ -3840,6 +3840,7 @@ def test_download_results_do_not_move_the_viewport(state, monkeypatch, tmp_path,
 
     async def scenario():
         async with app.run_test(size=(100, 24)) as pilot:
+            await settle(app, pilot)  # exclude the initial scan/layout from completion assertions
             table = app.query_one("#tracks", TrackTable)
             table.move_cursor(row=30)
             await scroll_table(pilot, table, 20)
@@ -5112,5 +5113,119 @@ def test_queued_mark_is_discarded_when_the_playlist_changes(state, monkeypatch):
                 release.set()
             await app.workers.wait_for_complete()
             assert state.get('500') == 'new'
+
+    run(scenario)
+
+
+def test_local_explorer_and_export_dialog_defaults(state, tmp_path, monkeypatch):
+    from textual.widgets import Checkbox, Tree
+
+    from dj_digger.services.local_library import LocalLibrary
+    from dj_digger.tui.local_screens import ExportOptions
+
+    path = tmp_path / 'local.wav'
+    path.write_bytes(b'not decoded in this UI test')
+    local = LocalLibrary(state.db)
+    track = local.register(path)
+    monkeypatch.setattr(LocalLibrary, 'register', lambda self, path, **kwargs: track)
+    app = make_app([], state)
+
+    async def scenario():
+        async with app.run_test(size=(140, 50)) as pilot:
+            app.local_controller.open(tmp_path)
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert len(app.playlist_state.rows) == 1
+            assert app.playlist_state.rows[0].records == []
+            assert app.playlist_state.rows[0].track.local_id
+            assert app.query_one('#explorer', Tree)
+            app.action_local_export()
+            await pilot.pause()
+            assert isinstance(app.screen, ExportOptions)
+            assert app.screen.profile().bits == 24
+            assert app.screen.profile().rate == 48000
+            assert not app.screen.query_one('#replace', Checkbox).value
+            await pilot.press('escape')
+            app.action_local_edit()
+            await pilot.pause()
+            app.screen.query_one('#bpm', Input).value = '128'
+            app.screen.query_one('#save', Button).press()
+            await pilot.pause()  # dispatch Button.Pressed before waiting for its worker
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            assert app.playlist_state.rows[0].track.bpm == 128
+
+    run(scenario)
+
+
+def test_playback_advances_past_duplicate_playlist_occurrences(state, monkeypatch):
+    from copy import deepcopy
+    app = player_app(synthetic_records(2), state)
+    asked = []
+    monkeypatch.setattr(app.playback_controller, 'fetch_audio', lambda track, generation: asked.append((track, generation)))
+
+    async def scenario():
+        async with app.run_test():
+            controller = app.playback_controller
+            first, second = [row.track for row in app.playlist_state.rows]
+            app.crate_controller.set_tracks([first, second, deepcopy(first)])
+            last = app.playlist_state.visible_rows[2]
+            controller._start_playback(last.track)
+            track, generation = asked[-1]
+            controller._audio_ready(track, a_stream(), [], None, generation)
+            assert controller._playing_index() == 2
+            assert controller._step_from_playing(1) is None
+            assert controller._step_from_playing(-1) == 1
+
+    run(scenario)
+
+
+def test_local_waveform_arrives_after_pause_and_rejects_replaced_audio(state, tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+
+    from dj_digger import local_audio
+    from dj_digger.services.local_library import LocalLibrary
+
+    if not shutil.which('ffmpeg'):
+        pytest.skip('FFmpeg is not installed')
+    path = tmp_path / 'waveform.wav'
+    subprocess.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i',
+                    'sine=frequency=440:duration=0.2', str(path)], check=True)
+    track = LocalLibrary(state.db).register(path)
+    app = player_app([], state)
+    entered, release = Event(), Event()
+    actual_waveform = local_audio.waveform
+
+    def delayed_waveform(*args):
+        entered.set()
+        assert release.wait(10)
+        return actual_waveform(*args)
+
+    monkeypatch.setattr(local_audio, 'waveform', delayed_waveform)
+
+    async def scenario():
+        async with app.run_test() as pilot:
+            app.crate_controller.set_tracks([track])
+            source = SimpleNamespace(_closed=False, close=lambda: None)
+            controller = app.playback_controller
+            controller._audio_ready(track, a_stream(), [], source)
+            loaded = app.player.loaded
+            bar = app.query_one('#player', PlayerBar)
+            empty_shape = list(bar._rows(loaded))
+            try:
+                assert await asyncio.to_thread(entered.wait, 5)
+                controller.action_play_pause()
+                assert not app.player.playing
+            finally:
+                release.set()
+            await settle(app, pilot)
+            assert len(loaded.waveform) == 1024
+            assert max(loaded.waveform) > 0
+            assert bar._rows(loaded) != empty_shape
+            # A new load of the same file must not receive the old result.
+            replacement = app.player.load(track, a_stream(), None, [])
+            controller._waveform_ready(loaded, [99])
+            assert replacement.waveform == []
 
     run(scenario)
